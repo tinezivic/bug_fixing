@@ -1,0 +1,15 @@
+# Cloned source repos (already have their own git)
+pandas/src/
+arrow/src/
+
+# Python
+pandas/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Build artifacts
+arrow/src/cpp/build/
+
+# OS
+.DS_Store

@@ -1,0 +1,173 @@
+diff --git a/cpp/src/arrow/array/array_dict_test.cc b/cpp/src/arrow/array/array_dict_test.cc
+index 22d6d1f..1f53b36 100644
+--- a/cpp/src/arrow/array/array_dict_test.cc
++++ b/cpp/src/arrow/array/array_dict_test.cc
+@@ -1761,4 +1761,54 @@ TEST(TestDictionaryUnifier, TableZeroColumns) {
+   AssertTablesEqual(*table, *unified);
+ }
+ 
++// GH-41017: DictionaryBuilder should preserve the ordered flag
++TEST(TestDictionaryBuilder, MakeBuilderPreservesOrdered) {
++  auto ordered_type = dictionary(int8(), utf8(), /*ordered=*/true);
++  std::unique_ptr<ArrayBuilder> boxed_builder;
++  ASSERT_OK(MakeBuilder(default_memory_pool(), ordered_type, &boxed_builder));
++
++  auto& builder = checked_cast<DictionaryBuilder<StringType>&>(*boxed_builder);
++  ASSERT_OK(builder.Append("a"));
++  ASSERT_OK(builder.Append("b"));
++  ASSERT_OK(builder.Append("a"));
++
++  std::shared_ptr<Array> result;
++  ASSERT_OK(builder.Finish(&result));
++
++  const auto& result_type = checked_cast<const DictionaryType&>(*result->type());
++  ASSERT_TRUE(result_type.ordered())
++      << "DictionaryBuilder should preserve ordered=true from the input type";
++}
++
++TEST(TestDictionaryBuilder, MakeBuilderUnorderedByDefault) {
++  auto unordered_type = dictionary(int8(), utf8(), /*ordered=*/false);
++  std::unique_ptr<ArrayBuilder> boxed_builder;
++  ASSERT_OK(MakeBuilder(default_memory_pool(), unordered_type, &boxed_builder));
++
++  auto& builder = checked_cast<DictionaryBuilder<StringType>&>(*boxed_builder);
++  ASSERT_OK(builder.Append("x"));
++
++  std::shared_ptr<Array> result;
++  ASSERT_OK(builder.Finish(&result));
++
++  const auto& result_type = checked_cast<const DictionaryType&>(*result->type());
++  ASSERT_FALSE(result_type.ordered());
++}
++
++TEST(TestDictionaryBuilder, MakeDictionaryBuilderPreservesOrdered) {
++  auto ordered_type = dictionary(int8(), int32(), /*ordered=*/true);
++  std::unique_ptr<ArrayBuilder> builder;
++  ASSERT_OK(MakeDictionaryBuilder(default_memory_pool(), ordered_type, nullptr, &builder));
++
++  auto& dict_builder = checked_cast<DictionaryBuilder<Int32Type>&>(*builder);
++  ASSERT_OK(dict_builder.Append(10));
++  ASSERT_OK(dict_builder.Append(20));
++
++  std::shared_ptr<Array> result;
++  ASSERT_OK(dict_builder.Finish(&result));
++
++  const auto& result_type = checked_cast<const DictionaryType&>(*result->type());
++  ASSERT_TRUE(result_type.ordered());
++}
++
+ }  // namespace arrow
+diff --git a/cpp/src/arrow/array/builder_dict.h b/cpp/src/arrow/array/builder_dict.h
+index 116c820..1c33d97 100644
+--- a/cpp/src/arrow/array/builder_dict.h
++++ b/cpp/src/arrow/array/builder_dict.h
+@@ -490,9 +490,12 @@ class DictionaryBuilderBase : public ArrayBuilder {
+   Status Finish(std::shared_ptr<DictionaryArray>* out) { return FinishTyped(out); }
+ 
+   std::shared_ptr<DataType> type() const override {
+-    return ::arrow::dictionary(indices_builder_.type(), value_type_);
++    return ::arrow::dictionary(indices_builder_.type(), value_type_, ordered_);
+   }
+ 
++  /// \brief Set whether the dictionary is ordered
++  void set_ordered(bool ordered) { ordered_ = ordered; }
++
+  protected:
+   template <typename c_type>
+   Status AppendArraySliceImpl(const typename TypeTraits<T>::ArrayType& dict,
+@@ -559,6 +562,9 @@ class DictionaryBuilderBase : public ArrayBuilder {
+   // Only used for FixedSizeBinaryType
+   int32_t byte_width_;
+ 
++  // Whether the dictionary is ordered
++  bool ordered_ = false;
++
+   BuilderType indices_builder_;
+   std::shared_ptr<DataType> value_type_;
+ };
+@@ -647,7 +653,7 @@ class DictionaryBuilderBase<BuilderType, NullType> : public ArrayBuilder {
+ 
+   Status FinishInternal(std::shared_ptr<ArrayData>* out) override {
+     ARROW_RETURN_NOT_OK(indices_builder_.FinishInternal(out));
+-    (*out)->type = dictionary((*out)->type, null());
++    (*out)->type = dictionary((*out)->type, null(), ordered_);
+     (*out)->dictionary = NullArray(0).data();
+     return Status::OK();
+   }
+@@ -659,11 +665,15 @@ class DictionaryBuilderBase<BuilderType, NullType> : public ArrayBuilder {
+   Status Finish(std::shared_ptr<DictionaryArray>* out) { return FinishTyped(out); }
+ 
+   std::shared_ptr<DataType> type() const override {
+-    return ::arrow::dictionary(indices_builder_.type(), null());
++    return ::arrow::dictionary(indices_builder_.type(), null(), ordered_);
+   }
+ 
++  /// \brief Set whether the dictionary is ordered
++  void set_ordered(bool ordered) { ordered_ = ordered; }
++
+  protected:
+   BuilderType indices_builder_;
++  bool ordered_ = false;
+ };
+ 
+ }  // namespace internal
+diff --git a/cpp/src/arrow/builder.cc b/cpp/src/arrow/builder.cc
+index 1a6a718..3cc5cf9 100644
+--- a/cpp/src/arrow/builder.cc
++++ b/cpp/src/arrow/builder.cc
+@@ -169,16 +169,23 @@ struct DictionaryBuilderCase {
+   Status CreateFor() {
+     using AdaptiveBuilderType = DictionaryBuilder<ValueType>;
+     if (dictionary != nullptr) {
+-      out->reset(new AdaptiveBuilderType(dictionary, pool));
++      auto* builder = new AdaptiveBuilderType(dictionary, pool);
++      builder->set_ordered(ordered);
++      out->reset(builder);
+     } else if (exact_index_type) {
+       if (!is_integer(index_type->id())) {
+         return Status::TypeError("MakeBuilder: invalid index type ", *index_type);
+       }
+-      out->reset(new internal::DictionaryBuilderBase<TypeErasedIntBuilder, ValueType>(
+-          index_type, value_type, pool));
++      auto* builder =
++          new internal::DictionaryBuilderBase<TypeErasedIntBuilder, ValueType>(
++              index_type, value_type, pool);
++      builder->set_ordered(ordered);
++      out->reset(builder);
+     } else {
+       auto start_int_size = index_type->byte_width();
+-      out->reset(new AdaptiveBuilderType(start_int_size, value_type, pool));
++      auto* builder = new AdaptiveBuilderType(start_int_size, value_type, pool);
++      builder->set_ordered(ordered);
++      out->reset(builder);
+     }
+     return Status::OK();
+   }
+@@ -191,6 +198,7 @@ struct DictionaryBuilderCase {
+   const std::shared_ptr<Array>& dictionary;
+   bool exact_index_type;
+   std::unique_ptr<ArrayBuilder>* out;
++  bool ordered;
+ };
+ 
+ struct MakeBuilderImpl {
+@@ -206,7 +214,8 @@ struct MakeBuilderImpl {
+                                      dict_type.value_type(),
+                                      /*dictionary=*/nullptr,
+                                      exact_index_type,
+-                                     &out};
++                                     &out,
++                                     dict_type.ordered()};
+     return visitor.Make();
+   }
+ 
+@@ -334,7 +343,8 @@ Status MakeDictionaryBuilder(MemoryPool* pool, const std::shared_ptr<DataType>&
+   const auto& dict_type = static_cast<const DictionaryType&>(*type);
+   DictionaryBuilderCase visitor = {
+       pool,       dict_type.index_type(),     dict_type.value_type(),
+-      dictionary, /*exact_index_type=*/false, out};
++      dictionary, /*exact_index_type=*/false, out,
++      dict_type.ordered()};
+   return visitor.Make();
+ }
+ 

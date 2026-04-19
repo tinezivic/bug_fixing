@@ -1,0 +1,12 @@
+--- a/pandas/core/arrays/arrow/array.py
++++ b/pandas/core/arrays/arrow/array.py
+@@ -690,7 +690,9 @@ class ArrowExtensionArray(
+                 pa_array = arr._pa_array
+ 
+         if pa_type is not None and pa_array.type != pa_type:
+             if pa.types.is_dictionary(pa_type):
++                # GH#58152 - pa.array() drops the ordered flag for dictionary types
++                # (upstream: https://github.com/apache/arrow/issues/41017)
+                 pa_array = pa_array.dictionary_encode()
+                 if pa_array.type != pa_type:
+                     pa_array = pa_array.cast(pa_type)
