@@ -1,9 +1,12 @@
 # Cloned source repos (already have their own git)
 pandas/src/
 arrow/src/
+matplotlib/src/
+bambu/src/
 
-# Python
+# Python virtualenvs
 pandas/.venv/
+matplotlib/.venv/
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -11,5 +14,13 @@ __pycache__/
 # Build artifacts
 arrow/src/cpp/build/
 
+# Test output images
+matplotlib/*/analysis/*.png
+matplotlib/result_images/
+
+# Temp/scratch
+pandas/test-data.xml
+
 # OS
 .DS_Store
+Thumbs.db
