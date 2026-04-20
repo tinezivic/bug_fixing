@@ -19,6 +19,7 @@ matplotlib/result_images/
 
 # Temp/scratch
 pandas/test-data.xml
+bambu2/
 
 # OS
 .DS_Store
